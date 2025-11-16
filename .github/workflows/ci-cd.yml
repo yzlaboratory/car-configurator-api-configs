@@ -1,0 +1,156 @@
+#use shared modules to reduce duplicate code after the fact
+
+name: 'Config Microservice Pipeline'
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# --- OIDC Permissions ---
+# This is required for secure, keyless authentication to AWS.
+permissions:
+  id-token: write   # Allows the pipeline to get an OIDC token from GitHub
+  contents: read    # Allows checkout of the code
+  pull-requests: write # Allows the `plan` to be posted as a PR comment
+  actions: read     # Allows the `apply_production` job to download the plan artifact
+
+env:
+  TF_VERSION: 'latest'
+  AWS_REGION: 'eu-central-1'
+  ECR_REPOSITORY: 'car-configurator/api-config'
+  ECS_SERVICE_STAGING: 'car-configurator-staging-config-ecs'
+  ECS_SERVICE_PRODUCTION: 'car-configurator-prod-config-ecs'
+  ECS_CLUSTER_STAGING: 'car-configurator-staging-cluster'
+  ECS_CLUSTER_PROD: 'car-configurator-prod-cluster'
+
+jobs:
+  validate:
+    name: 'Validate'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'corretto'
+          cache: 'maven'
+
+      #configure SAST with codeql here, then replace dependency check aswell
+      - name: Grant execute permission for mvnw
+        run: chmod +x ./mvnw
+
+      - name: Compile Code
+        run: ./mvnw -B compile
+
+      - name: Run Unit Tests
+        run: ./mvnw -B test
+
+#      - name: Run Dependency-Check (Vulnerabilities)
+#        run: ./mvnw -B org.owasp:dependency-check-maven:check -DnvdApiKey=${{ secrets.NVD_API_KEY }}
+
+      - name: Run Integration Tests
+        run: ./mvnw -B verify
+
+  deploy-staging:
+    name: 'Deploy to staging'
+    # Läuft NUR bei einem Push auf 'main' (d.h. nach einem Merge)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: validate
+
+    permissions:
+      contents: read
+      id-token: write  # Für die AWS-Authentifizierung
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'corretto'
+          cache: 'maven'
+
+      - name: Grant execute permission for mvnw
+        run: chmod +x ./mvnw
+
+      - name: Run All CI Steps (Compile, Test, Scans)
+        run: |
+          ./mvnw -B compile
+          ./mvnw -B test
+          ./mvnw -B verify
+          ./mvnw -B package
+
+      - name: Configure AWS Credentials
+        # Verwendet OIDC für eine sichere, passwortlose Anmeldung bei AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: eu-central-1
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push docker image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        run: |
+          docker build -t $REGISTRY/$REPOSITORY:${{ github.sha }} -t $REGISTRY/$REPOSITORY:staging .
+          docker push --all-tags $REGISTRY/$REPOSITORY
+
+      - name: Force ECS Staging Pull now
+        run: |
+          aws ecs update-service --cluster ${{ env.ECS_CLUSTER_STAGING }} --service ${{ env.ECS_SERVICE_STAGING }} --force-new-deployment
+
+  deploy-production:
+    name: 3. Deploy to Production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy-staging
+
+    environment:
+      name: production
+
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Für die AWS-Authentifizierung
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: eu-central-1
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      #pull the image
+      #push it up with a different tag
+      - name: 'Pull, Tag, and Push Image'
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        run: |
+          docker pull $REGISTRY/$REPOSITORY:staging
+          docker tag $REGISTRY/$REPOSITORY:staging $REGISTRY/$REPOSITORY:latest
+          docker push $REGISTRY/$REPOSITORY:latest
+
+#       Wait until cluster actually exists with commenting this out
+#      - name: Force ECS Pull now
+#        run: |
+#          aws ecs update-service --cluster ${{ env.ECS_CLUSTER_PRODUCTION }} --service ${{ env.ECS_SERVICE_PRODUCTION }} --force-new-deployment
