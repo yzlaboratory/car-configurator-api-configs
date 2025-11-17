@@ -29,9 +29,9 @@ public class ConfigController {
     }
 
     @PostMapping()
-    public ResponseEntity<String> postConfig(@RequestBody Config config) {
+    public ResponseEntity<Config> postConfig(@RequestBody Config config) {
         config.setConfigId(UUIDService.getUUID());
         this.dynamoDbService.saveConfig(config);
-        return new ResponseEntity<>(config.getConfigId(), HttpStatus.CREATED);
+        return new ResponseEntity<>(config, HttpStatus.CREATED);
     }
 }

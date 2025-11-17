@@ -11,6 +11,7 @@ public class Config {
     private String configId;
     private List<String> config;
     private BigDecimal price;
+    private String modelId;
 
     public Config() {}
 
@@ -37,5 +38,13 @@ public class Config {
 
     public void setPrice(BigDecimal price) {
         this.price = price;
+    }
+
+    public String getModelId() {
+        return modelId;
+    }
+
+    public void setModelId(String modelId) {
+        this.modelId = modelId;
     }
 }
