@@ -30,7 +30,7 @@ public class ConfigController {
         return this.dynamoDbService.getConfigById(configId);
     }
 
-    @PostMapping("/")
+    @PostMapping()
     public ResponseEntity<String> postConfig(@RequestBody Config config) {
         System.out.println("postConfig Controller called");
         config.setConfigId(UUIDService.getUUID());
