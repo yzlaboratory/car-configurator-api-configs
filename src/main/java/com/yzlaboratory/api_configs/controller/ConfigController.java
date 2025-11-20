@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/configs")
+@CrossOrigin
 public class ConfigController {
 
     private final DynamoDbService dynamoDbService;
